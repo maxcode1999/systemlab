@@ -1,0 +1,110 @@
+# Lab A1 — Huge pages benchmark results
+# Host: lab-a1-pmu-x86 (GCP C4, PMU enabled)
+
+================================================================================
+CPU / TLB (guest-visible)
+================================================================================
+
+Model name:    Intel(R) Xeon(R) Platinum 8581C CPU @ 2.30GHz
+CPUID:         GenuineIntel, family 6, model 207, stepping 2
+Machine:       GCP C4 (lab-a1-pmu-x86), KVM full virtualization
+
+L1 dTLB:       ~48 entries (4 KiB + 2 MiB pages, per logical CPU)
+L2 STLB:       ~4096 entries (4 KiB + 2 MiB pages, typical Emerald Rapids class)
+
+Note: CPUID leaf 0x18 returned all zeros in this guest (GCE/KVM masking).
+      TLB capacities above are from Intel ER/8581C-class documentation, not
+      runtime occupancy (Linux does not expose TLB fill level).
+
+L1d cache:     48 KiB (from cpuid leaf 4 — not TLB)
+L2 cache:      2 MiB per core instance (from cpuid leaf 4)
+L3 cache:      260 MiB (from lscpu / cpuid leaf 4)
+
+================================================================================
+SUMMARY TABLE
+================================================================================
+
+Mode    | Phase  | page-faults | touch wall(s) | rdtscp_touch   | dTLB-loads  | dTLB-misses | dTLB miss % | random wall(s) | rdtscp_random
+--------|--------|-------------|---------------|----------------|-------------|-------------|-------------|----------------|---------------
+4k      | touch  |   1,048,715 |     1.802     |  3,882,930,644 |      —      |      —      |      —      |       —        |      —
+4k      | random |      (in run)|      —        |       —        | 1,597,881,996| 49,912,444 |    3.12%    |     2.613      | 1,965,054,390
+hugetlb | touch  |       2,186 |     0.488     |  1,117,772,204 |      —      |      —      |      —      |       —        |      —
+hugetlb | random |      (in run)|      —        |       —        |   113,068,124| 26,979,999 |   23.86%    |     1.154      | 1,530,644,706
+thp     | touch  |       2,187 |     0.660     |  1,489,625,136 |      —      |      —      |      —      |       —        |      —
+thp     | random |      (in run)|      —        |       —        |   142,068,767| 26,857,990 |   18.90%    |     1.327      | 1,530,826,360
+
+================================================================================
+SUMMARY TABLE — 1 GiB (1073741824 bytes, random-pass only)
+================================================================================
+taskset -c 3; iterations=50000000; stride 4096. Mappings: 4k ≈ 262144 pages; hugetlb = 512 × 2 MiB.
+TLB walk events: trust walk_completed / 2m_4m / 4k (stlb_hit unreliable when misses are tiny).
+
+Mode    | dTLB-loads | dTLB-misses | miss %  | walk_done | walk_2m_4m | walk_4k   | random wall(s) | rdtscp_random
+--------|------------|-------------|---------|-----------|------------|-----------|----------------|---------------
+4k      |  468,515,735|  49,679,055 |  10.60% | 49,581,752|      8,020 | 49,635,565|          1.229 |  1,795,799,816
+hugetlb |  104,554,311|         940 |   ~0%   |       782 |         83 |        62 |          0.804 |  1,560,972,912
+
+Takeaway: 512 huge regions fit STLB → ~800 walks; 262k 4k pages + random → ~50M 4k walks (same order as 4 GiB run).
+
+Conclusions:
+- As huge pages get to around 500, they start getting into l2 TLB of 4k entries.
+- 2MB page walks take less time 25% compared to 4k page walks as one level less transitioned.
+- Think of the STLB not as one long shelf with 4k open slots, but as 2048 slots organized into, say, 
+256 mailboxes, each with 8 pigeonholes (that's what "256 sets, 8-way associative" means). 
+When a new page translation comes in, it doesn't get to pick any empty slot anywhere — hardware math 
+(usually a few bits of the virtual address) decides which one mailbox it's allowed to go into. 
+It can only use one of that mailbox's 8 pigeonholes. Now connect it to your experiment. With random access, you're not filling mailboxes in a neat, evenly-spread way
+
+
+
+================================================================================
+RAW PERF OUTPUT (verbatim-ish)
+================================================================================
+
+--- MODE=4k touch (taskset -c 3) ---
+page-faults 1048715 | minor-faults 1048715 | major-faults 0
+cycles 5889772442 | instructions 6694132515 (1.14 ipc)
+time elapsed 1.802398472 s
+bench: rdtscp_cycles=3882930644
+
+--- MODE=4k random ---
+dTLB-loads 1597881996 | dTLB-load-misses 49912444 (3.12%)
+cycles 8538019144 | instructions 7413580196 (0.87 ipc)
+time elapsed 2.612935814 s
+bench: rdtscp_cycles=1965054390 iterations=50000000
+
+--- MODE=hugetlb touch ---
+page-faults 2186 | minor-faults 2186 | major-faults 0
+cycles 1595055163 | instructions 64204747 (0.04 ipc)
+time elapsed 0.487952011 s
+bench: rdtscp_cycles=1117772204
+
+--- MODE=hugetlb random ---
+dTLB-loads 113068124 | dTLB-load-misses 26979999 (23.86%)
+cycles 3776703403 | instructions 1163383945 (0.31 ipc)
+time elapsed 1.153888733 s
+bench: rdtscp_cycles=1530644706 iterations=50000000
+
+--- MODE=thp touch ---
+page-faults 2187 | minor-faults 2187 | major-faults 0
+cycles 2163291413 | instructions 208112505 (0.10 ipc)
+time elapsed 0.660350919 s
+bench: rdtscp_cycles=1489625136
+
+--- MODE=thp random ---
+dTLB-loads 142068767 | dTLB-load-misses 26857990 (18.90%)
+cycles 4320393409 | instructions 1307982743 (0.30 ipc)
+time elapsed 1.326727040 s
+bench: rdtscp_cycles=1530826360 iterations=50000000
+
+--- 1 GiB MODE=4k random (taskset -c 3) ---
+dTLB-loads 468515735 | dTLB-load-misses 49679055 (10.60%)
+walk_completed 49581752 | walk_2m_4m 8020 | walk_4k 49635565
+time elapsed 1.229177079 s
+bench: rdtscp_cycles=1795799816 iterations=50000000
+
+--- 1 GiB MODE=hugetlb random (taskset -c 3) ---
+dTLB-loads 104554311 | dTLB-load-misses 940
+walk_completed 782 | walk_2m_4m 83 | walk_4k 62
+time elapsed 0.803852118 s
+bench: rdtscp_cycles=1560972912 iterations=50000000
