@@ -255,17 +255,18 @@ MODE=4k
 perf stat -e page-faults,minor-faults,major-faults,cycles,instructions \
   taskset -c 2-3 ./bench --mode "$MODE" --size 4294967296 --touch-only
 
-# dTLB + page walks on random (populate + random in one run; needs PMU — C4+ on GCP)
-perf stat -e dTLB-loads,dTLB-load-misses,dtlb_load_misses.walk_completed,dtlb_load_misses.walk_completed_2m_4m,dtlb_load_misses.walk_completed_4k,cycles,instructions \
+# dTLB (L1) + STLB (L2) hit/miss + page walks on random (populate + random; C4+ PMU on GCP)
+# dtlb_load_misses.stlb_hit = L1 miss, L2 STLB hit | mem_inst_retired.stlb_miss_loads = STLB true miss
+perf stat -e dTLB-loads,dTLB-load-misses,dtlb_load_misses.stlb_hit,mem_inst_retired.stlb_miss_loads,dtlb_load_misses.walk_completed,dtlb_load_misses.walk_completed_2m_4m,dtlb_load_misses.walk_completed_4k,cycles,instructions \
   taskset -c 2-3 ./bench --mode "$MODE" --size 4294967296 --random-pass --iterations 50000000
 
 # Optional: 1 GiB (512 huge pages) — STLB often holds working set → ~800 walks vs ~50M for 4k
 # SIZE=1073741824
-# perf stat -e dTLB-loads,dTLB-load-misses,dtlb_load_misses.walk_completed,dtlb_load_misses.walk_completed_2m_4m,dtlb_load_misses.walk_completed_4k \
+# perf stat -e dTLB-loads,dTLB-load-misses,dtlb_load_misses.stlb_hit,mem_inst_retired.stlb_miss_loads,dtlb_load_misses.walk_completed,dtlb_load_misses.walk_completed_2m_4m,dtlb_load_misses.walk_completed_4k \
 #   taskset -c 3 ./bench --mode "$MODE" --size "$SIZE" --random-pass --iterations 50000000
 ```
 
-**dTLB miss rate:** `dTLB-load-misses / dTLB-loads`. **Page walks:** `dtlb_load_misses.walk_completed` (all levels missed); split **2m_4m** vs **4k** confirms huge vs small mappings. Prefer **walk_completed** over `dtlb_load_misses.stlb_hit` when misses are tiny (counter groups can disagree). **Runtime:** perf elapsed, bench `rdtscp_cycles`, or:
+**L1:** `dTLB-load-misses / dTLB-loads`. **L2 hit (L1 miss, STLB hit):** `dtlb_load_misses.stlb_hit`. **L2 true miss:** `mem_inst_retired.stlb_miss_loads`. **Walks:** `dtlb_load_misses.walk_completed` (**2m_4m** vs **4k**). If `stlb_hit` ≫ `dTLB-load-misses`, treat as multiplex noise; trust **walk_completed**. **Runtime:** perf elapsed, bench `rdtscp_cycles`, or:
 
 ```bash
 # GNU time (not the shell builtin)
@@ -337,7 +338,7 @@ g++ -O2 -std=c++17 -Wall -Wextra -o bench bench_hugepages.cpp
 # Measure (MODE=4k | hugetlb | thp)
 perf stat -e page-faults,minor-faults,major-faults \
   ./bench --mode "$MODE" --size 4294967296 --touch-only
-perf stat -e dTLB-loads,dTLB-load-misses,dtlb_load_misses.walk_completed,dtlb_load_misses.walk_completed_2m_4m,dtlb_load_misses.walk_completed_4k \
+perf stat -e dTLB-loads,dTLB-load-misses,dtlb_load_misses.stlb_hit,mem_inst_retired.stlb_miss_loads,dtlb_load_misses.walk_completed,dtlb_load_misses.walk_completed_2m_4m,dtlb_load_misses.walk_completed_4k \
   ./bench --mode "$MODE" --size 4294967296 --random-pass --iterations 50000000
 ```
 
