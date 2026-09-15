@@ -177,8 +177,7 @@ func main() {
 
 	cfg := raft.DefaultConfig()
 	cfg.LocalID = raft.ServerID(*id)
-	cfg.Logger = logger
-	cfg.LogLevel = "INFO"
+	// Raft library logs go to stderr; lab file logger is for bootstrap/http lines below.
 
 	r, err := raft.NewRaft(cfg, fsm, logStore, stableStore, snapStore, transport)
 	if err != nil {
@@ -201,35 +200,32 @@ func main() {
 		logger.Printf("bootstrapped cluster with %d servers", len(servers))
 	}
 
-	var rref raft.Raft = r
 	mux := http.NewServeMux()
 
 	// Client discovery: any node can report current leader (see leaderId / leaderAddr).
 	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
-		st := rref.Stats()
-		stats, _ := rref.GetConfiguration()
-		leaderAddr, leaderID := rref.LeaderWithID()
-		lastIdx := uint64(rref.LastIndex())
+		st := r.Stats()
+		leaderAddr, leaderID := r.LeaderWithID()
+		lastIdx := uint64(r.LastIndex())
 		commitIdx := statU64(st, "commit_index")
 		term := statU64(st, "term")
 		role := "follower"
-		switch rref.State() {
+		switch r.State() {
 		case raft.Candidate:
 			role = "candidate"
 		case raft.Leader:
 			role = "leader"
 		}
-		_ = stats
 		out := map[string]interface{}{
 			"id":           *id,
-			"leader":       rref.State() == raft.Leader,
+			"leader":       r.State() == raft.Leader,
 			"role":         role,
 			"term":         term,
 			"leaderId":     string(leaderID),
 			"leaderAddr":   string(leaderAddr),
 			"lastIndex":    lastIdx,
 			"commitIndex":  commitIdx,
-			"state":        rref.State().String(),
+			"state":        r.State().String(),
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(out)
@@ -237,7 +233,7 @@ func main() {
 
 	// Leader appends to log, replicates to followers, waits for quorum commit, then Apply runs on all nodes.
 	mux.HandleFunc("/write", func(w http.ResponseWriter, req *http.Request) {
-		if rref.State() != raft.Leader {
+		if r.State() != raft.Leader {
 			http.Error(w, "not leader", http.StatusServiceUnavailable)
 			return
 		}
@@ -247,7 +243,7 @@ func main() {
 			return
 		}
 		cmd, _ := json.Marshal(setCmd{Op: "set", Key: key, Val: val})
-		fut := rref.Apply(cmd, 5*time.Second)
+		fut := r.Apply(cmd, 5*time.Second)
 		if err := fut.Error(); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -258,7 +254,7 @@ func main() {
 
 	// Lab simplification: read local FSM on leader only (no ReadIndex / follower reads).
 	mux.HandleFunc("/read", func(w http.ResponseWriter, req *http.Request) {
-		if rref.State() != raft.Leader {
+		if r.State() != raft.Leader {
 			http.Error(w, "not leader (lab: read via leader only)", http.StatusServiceUnavailable)
 			return
 		}

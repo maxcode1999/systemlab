@@ -46,16 +46,22 @@ gcloud compute instances delete lab-raft-31 --zone=us-central1-a --quiet
 From your laptop, create the VM and SSH in (commands above). **On the VM:**
 
 ```bash
-# Packages: partitions, JSON status, Go toolchain
+# Packages: partitions, JSON status (do NOT use apt golang-go — it is Go 1.18 on Ubuntu 22.04)
 sudo apt update
-sudo apt install -y git jq iptables iproute2 golang-go
+sudo apt install -y git jq iptables iproute2 curl
+
+# Install Go 1.22+ (required by go.mod; matches hashicorp/raft v1.7)
+GOVER=1.22.10
+curl -fsSL "https://go.dev/dl/go${GOVER}.linux-amd64.tar.gz" -o /tmp/go.tgz
+sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf /tmp/go.tgz
+export PATH=/usr/local/go/bin:$PATH
+go version   # expect go1.22.x
 
 # Clone (HTTPS or SSH — use the URL for your fork)
 git clone https://github.com/YOUR_USER/systemlab.git
 cd systemlab/distributed/raft_lab_3_1
 
-# Fetch modules and build Linux binary on the VM
-go mod tidy
+# go.sum is in the repo — build only; run go mod tidy if you change go.mod
 go build -o raft-node ./cmd/raft-node
 chmod +x raft-node
 
@@ -420,6 +426,8 @@ Explain in prose:
 | Two leaders after partition | Expected on minority **briefly**; verify **no commit** on minority for new client writes |
 | `iptables` on macOS | Run lab on **GCP Ubuntu VM** (this doc) |
 | All nodes candidate, no leader | Increase election timeout spread; check **port** connectivity |
+| `go mod tidy`: max version 1.18 | **apt `golang-go` is too old** — install from [go.dev/dl](https://go.dev/dl/) (see Path A) |
+| `missing go.sum entry` | **`git pull`** for committed `go.sum`, or run `go mod tidy` with Go **≥ 1.21** |
 | Data dir reuse | `rm -rf data logs` between full replays; **`-bootstrap` only on node1** when data is empty |
 | Commits on 2-node partition | Bug — check **Apply** only after **commitIndex** advance on **current term** |
 
