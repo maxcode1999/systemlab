@@ -1,0 +1,164 @@
+# Lab 3.1 — Raft cluster results
+# Host: lab-raft-31 (GCP e2-standard-4, Ubuntu 22.04)
+# Code: distributed/raft_lab_3_1/cmd/raft-node (HashiCorp raft v1.7)
+# Date: 2026-09-15 (VM session)
+
+================================================================================
+ENVIRONMENT
+================================================================================
+
+VM:            lab-raft-31, us-central1-a
+Layout:        5 processes on localhost
+Raft RPC:      node1–2 → 127.0.0.1:8001–8002
+               node3–5 → 127.0.0.2:8003–8005  (partition lab split)
+HTTP /status:  127.0.0.1:9001–9005 (all nodes)
+Persistence:   BoltDB under data/node{id}/
+Bootstrap:     -bootstrap on node1 only, empty data/
+
+PEERS:
+  node1=127.0.0.1:8001,node2=127.0.0.1:8002,
+  node3=127.0.0.2:8003,node4=127.0.0.2:8004,node5=127.0.0.2:8005
+
+Build note:    apt golang-go (1.18) insufficient; Go 1.22 from go.dev required.
+               go.sum committed in repo for VM build.
+
+================================================================================
+BASELINE — cluster healthy (no iptables partition)
+================================================================================
+
+Observation (curl /status on 127.0.0.1:9001–9005):
+
+  node1: leader=true,  term=2
+  node2: leader=false, term=2
+  node3: leader=false, term=2
+  node4: leader=false, term=2
+  node5: leader=false, term=2
+
+Single leader, identical term on all five → quorum connected.
+
+Client I/O (leader HTTP 9001):
+
+  write?key=hello&val=world  → ok
+  read?key=hello             → {"key":"hello","val":"world"}
+
+================================================================================
+PARTITION ATTEMPT A — sport/dport DROP on lo (Step 3 old rules)
+================================================================================
+
+Rules: DROP tcp on lo with --sport 8001|8002 --dport 8003|8004|8005 (and reverse).
+
+iptables -L INPUT: 12 DROP lines, ALL pkts=0 after cluster activity.
+
+/status: all nodes same term (e.g. 4), one leader (e.g. node1), same commitIndex.
+
+Conclusion: rules did not match Raft TCP (Go dials use ephemeral source ports, not
+8001–8005). Cluster remained fully connected.
+
+================================================================================
+PARTITION B — 127.0.0.1 ↔ 127.0.0.2 DROP on lo (working split)
+================================================================================
+
+Rules:
+  INPUT -i lo -s 127.0.0.1 -d 127.0.0.2 -p tcp -j DROP
+  INPUT -i lo -s 127.0.0.2 -d 127.0.0.1 -p tcp -j DROP
+
+iptables counters (representative):
+
+  num  pkts  bytes  match
+  1    840   60114  127.0.0.1 → 127.0.0.2  DROP
+  2     12     624  127.0.0.2 → 127.0.0.1  DROP
+
+Cross-IP loopback traffic blocked; pkts increased → partition active.
+
+/status DURING partition (127.0.0.1:9001–9005):
+
+  port  id    leader  term  commitIndex
+  9001  node1 false   3     3
+  9002  node2 false   3     3
+  9003  node3 false   2     2
+  9004  node4 true    3     4
+  9005  node5 false   2     2
+
+Interpretation:
+  - Minority side (node1–2): term 3, commitIndex 3, no local leader.
+  - Majority side: node4 leader term 3, commitIndex 4 after write below.
+  - node3, node5 lagging (term 2, commitIndex 2) while node4 advanced — majority
+    subgroup not fully synced in this snapshot (replication/election under split).
+
+Writes during partition:
+
+  curl 127.0.0.1:9004/write?key=maj&val=1  → ok   (majority leader)
+  curl 127.0.0.1:9001/write?key=min&val=1  → fail (curl -sf; no ok body)
+
+Minority did not accept a successful replicated write; leader on 9004 committed
+entry advancing commitIndex 3 → 4 on node4 only (node1–2 stuck at 3).
+
+================================================================================
+LOG EXCERPTS (Raft library, logs/node*.log)
+================================================================================
+
+Node down (not partition):
+  dial tcp 127.0.0.1:8001: connect: connection refused
+  failed to contact: server-id=node1
+
+Cross-partition / mis-sync (earlier runs):
+  dial tcp 127.0.0.2:8004: i/o timeout
+  dial tcp 127.0.0.2:8005: i/o timeout
+  failed to appendEntries to node4/node5
+
+Election noise:
+  entering follower state; requestPreVote / requestVote newer term
+  lost leadership because received a requestVote with a newer term
+
+================================================================================
+LEADER FAILOVER (Step 2)
+================================================================================
+
+Procedure: identify leader via /status, kill process (pkill raft-node -id).
+
+Recorded election_ms:  not captured in this session.
+Restart killed node:  no -bootstrap; same data/ — rejoin as follower.
+
+(Re-run: T0=$(date +%s%N); kill leader; poll until new leader; T1=…; election_ms=…)
+
+================================================================================
+HEAL
+================================================================================
+
+  sudo iptables -F INPUT
+  sudo iptables -F OUTPUT   # if OUTPUT rules were added
+
+Post-heal /status snapshot: not recorded in this session — re-check same term and
+commitIndex on all five after heal for report diagram.
+
+================================================================================
+TERM / LOG DIAGRAM (partition B, conceptual)
+================================================================================
+
+Before partition (unified):
+  term 2  leader node1  [.. commits through index N ..]  all nodes match
+
+During partition (observed indices):
+  term 3  minority (node1–2)     commitIndex=3  (no entry 4)
+  term 3  majority leader node4  commitIndex=4  (maj write)
+  term 2  node3, node5           commitIndex=2  (lagging)
+
+After heal (expected, verify on VM):
+  single term, single leader, commitIndex aligned on all survivors; minority
+  truncates any uncommitted diverged suffix (log matching).
+
+================================================================================
+PITFALLS OBSERVED
+================================================================================
+
+1. sport-based iptables on lo → ineffective (pkts=0).
+2. HTTP only on 127.0.0.1 — curl 127.0.0.2:900x returns nothing (by design).
+3. Partial restarts → mixed terms (e.g. node4 term 3, node3/5 term 2).
+4. Clean reset: pkill, iptables -F, rm -rf data logs, start 5 nodes, -bootstrap
+   node1 only once.
+
+================================================================================
+CLEAN RESET (reference)
+================================================================================
+
+See raft_consensus_lab_3_1.md section "Clean reset (kill all + fresh cluster)".
