@@ -1,6 +1,7 @@
 - Use lower_bound (ge) and upper bound (g) on sorted vector only in O(logn).
 - Use std::distance to get distance between iterator in O(1);
 - Use vec.begin()+s and vec.begin()+e correctly to confine properly within range of merge sort.
+- Correct indices for sorted and presum array.
 - In our merge sort, we don't count for full prefix from 0th, so count them separately. Our merge sort takes diff of two indices.
 ```
 class Solution {
