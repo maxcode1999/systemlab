@@ -1,3 +1,8 @@
+- Keep base and mod in int64, so that intermediate multiplication doesn't cross 64 boundary.
+- Use base = 10^5+7 and mod = 10^12+7 to avoid hash collisions
+- Add extra mod when subtracting in mod operations to avoid negative value.
+- Use second mid point in binary search and break like s to m-1 and m to e.
+  
 ```
 class Solution {
 public:
